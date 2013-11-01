@@ -30,7 +30,7 @@ public final class CollectResult
 
     private List<Exception> exceptions;
 
-    private DependencyNode root;
+    private volatile DependencyNode root;
 
     /**
      * Creates a new result for the specified request.
@@ -79,7 +79,7 @@ public final class CollectResult
         {
             if ( exceptions.isEmpty() )
             {
-                exceptions = new ArrayList<Exception>();
+                exceptions = Collections.synchronizedList( new ArrayList<Exception>());
             }
             exceptions.add( exception );
         }

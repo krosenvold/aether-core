@@ -26,6 +26,15 @@ final class NodeStack
 
     private int size;
 
+    public NodeStack(){
+
+    }
+
+    private NodeStack(DependencyNode[] deps, int size){
+        this.nodes = deps;
+
+    }
+
     public DependencyNode top()
     {
         if ( size <= 0 )
@@ -114,4 +123,12 @@ final class NodeStack
         return Arrays.toString( nodes );
     }
 
+
+    public NodeStack fork()
+    {
+        NodeStack copy = new NodeStack();
+        System.arraycopy( nodes, 0, copy.nodes, 0, nodes.length );
+        copy.size = size;
+        return copy;
+    }
 }

@@ -61,6 +61,11 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 /**
  */
@@ -267,6 +272,32 @@ public class DefaultDependencyCollector
                      depTraverser != null ? depTraverser.deriveChildTraverser( context ) : null,
                      verFilter != null ? verFilter.deriveChildFilter( context ) : null );
 
+            int i = 0;
+            while (i < args.futures.size())
+            {
+                try
+                {
+                    args.futures.get(i).get();
+                    i++;
+                }
+                catch ( InterruptedException e )
+                {
+                    result.addException( e );
+                }
+                catch ( ExecutionException e )
+                {
+                    result.addException( e );
+                }
+            }
+            args.executor.shutdown();
+            try
+            {
+                args.executor.awaitTermination( 10*60, TimeUnit.SECONDS );
+            }
+            catch ( InterruptedException e )
+            {
+                result.addException( e );
+            }
             errorPath = results.errorPath;
         }
 
@@ -352,32 +383,51 @@ public class DefaultDependencyCollector
         return a.getGroupId() + ':' + a.getArtifactId() + ':' + a.getClassifier() + ':' + a.getExtension();
     }
 
-    private void process( final Args args, Results results, List<Dependency> dependencies,
-                          List<RemoteRepository> repositories, DependencySelector depSelector,
-                          DependencyManager depManager, DependencyTraverser depTraverser, VersionFilter verFilter )
+    private void process( final Args args, final Results results, final List<Dependency> dependencies,
+                          final List<RemoteRepository> repositories, final DependencySelector depSelector,
+                          final DependencyManager depManager, final DependencyTraverser depTraverser, final VersionFilter verFilter )
     {
-        for ( Dependency dependency : dependencies )
+        boolean useExecutor = dependencies.size() > 1;
+        for ( final Dependency dependency : dependencies )
         {
-            processDependency( args, results, repositories, depSelector, depManager, depTraverser, verFilter,
-                               dependency );
+            if (useExecutor)
+            {
+                Runnable command = new Runnable()
+                {
+                    public void run()
+                    {
+                        processDependency( args, results, repositories, depSelector, depManager, depTraverser, verFilter,
+                                           dependency, args.nodes.fork() );
+                    }
+                };
+                Future<?> submit = args.executor.submit( command );
+                args.futures.add( submit );
+            }
+            else
+            {
+                processDependency( args, results, repositories, depSelector, depManager, depTraverser, verFilter,
+                                   dependency, args.nodes );
+            }
         }
-    }
 
-    private void processDependency( Args args, Results results, List<RemoteRepository> repositories,
-                                    DependencySelector depSelector, DependencyManager depManager,
-                                    DependencyTraverser depTraverser, VersionFilter verFilter, Dependency dependency )
-    {
-
-        List<Artifact> relocations = Collections.emptyList();
-        boolean disableVersionManagement = false;
-        processDependency( args, results, repositories, depSelector, depManager, depTraverser, verFilter, dependency,
-                           relocations, disableVersionManagement );
     }
 
     private void processDependency( Args args, Results results, List<RemoteRepository> repositories,
                                     DependencySelector depSelector, DependencyManager depManager,
                                     DependencyTraverser depTraverser, VersionFilter verFilter, Dependency dependency,
-                                    List<Artifact> relocations, boolean disableVersionManagement )
+                                    NodeStack nodes )
+    {
+
+        List<Artifact> relocations = Collections.emptyList();
+        boolean disableVersionManagement = false;
+        processDependency( args, results, repositories, depSelector, depManager, depTraverser, verFilter, dependency,
+                           relocations, disableVersionManagement, nodes );
+    }
+
+    private void processDependency( Args args, Results results, List<RemoteRepository> repositories,
+                                    DependencySelector depSelector, DependencyManager depManager,
+                                    DependencyTraverser depTraverser, VersionFilter verFilter, Dependency dependency,
+                                    List<Artifact> relocations, boolean disableVersionManagement, NodeStack nodeStack )
     {
 
         if ( depSelector != null && !depSelector.selectDependency( dependency ) )
@@ -405,7 +455,7 @@ public class DefaultDependencyCollector
         }
         catch ( VersionRangeResolutionException e )
         {
-            results.addException( dependency, e, args.nodes );
+            results.addException( dependency, e, nodeStack );
             return;
         }
 
@@ -422,9 +472,9 @@ public class DefaultDependencyCollector
             {
                 d = d.setArtifact( descriptorResult.getArtifact() );
 
-                DependencyNode node = args.nodes.top();
+                DependencyNode node = nodeStack.top();
 
-                DependencyNode cycleNode = args.nodes.find( d.getArtifact() );
+                DependencyNode cycleNode = nodeStack.find( d.getArtifact() );
                 if ( cycleNode != null )
                 {
                     DefaultDependencyNode child =
@@ -440,7 +490,8 @@ public class DefaultDependencyCollector
                             && originalArtifact.getArtifactId().equals( d.getArtifact().getArtifactId() );
 
                     processDependency( args, results, repositories, depSelector, depManager, depTraverser, verFilter, d,
-                                       descriptorResult.getRelocations(), disableVersionManagementSubsequently );
+                                       descriptorResult.getRelocations(), disableVersionManagementSubsequently,
+                                       nodeStack );
                     return;
                 }
                 else
@@ -676,6 +727,11 @@ public class DefaultDependencyCollector
     static class Args
     {
 
+        final ExecutorService executor;
+
+        List<Future> futures = Collections.synchronizedList( new ArrayList<Future>(  ));
+
+
         final RepositorySystemSession session;
 
         final boolean ignoreRepos;
@@ -708,6 +764,7 @@ public class DefaultDependencyCollector
             this.nodes = nodes;
             this.collectionContext = collectionContext;
             this.versionContext = versionContext;
+            this.executor = Executors.newFixedThreadPool( 4 );
         }
 
     }
@@ -719,7 +776,7 @@ public class DefaultDependencyCollector
 
         final int maxExceptions;
 
-        String errorPath;
+        volatile String errorPath;
 
         public Results( CollectResult result, RepositorySystemSession session )
         {
